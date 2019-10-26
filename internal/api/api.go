@@ -1,13 +1,16 @@
 package api
 
 import (
-	"github.com/sirupsen/logrus"
 	"encoding/base64"
+	"encoding/json"
+
+	"fmt"
 	"net/http"
 	"runtime/debug"
 	"strings"
 	"time"
-	"fmt"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/NYTimes/gziphandler"
 	"github.com/gorilla/mux"
@@ -44,6 +47,15 @@ func New(a *app.App) (api *API, err error) {
 
 func (api *API) Init(r *mux.Router) {
 	r.Handle("/hello", gziphandler.GzipHandler(api.handler(api.RootHandler))).Methods("GET")
+	r.Handle("/user/", api.handler(api.CreateUser)).Methods("POST")
+
+	// todo methods
+	todosRouter := r.PathPrefix("/todos").Subrouter()
+	todosRouter.Handle("/", api.handler(api.GetTodos)).Methods("GET")
+	todosRouter.Handle("/", api.handler(api.CreateTodo)).Methods("POST")
+	todosRouter.Handle("/{id:[0-9]+}/", api.handler(api.GetTodoById)).Methods("GET")
+	todosRouter.Handle("/{id:[0-9]+}/", api.handler(api.UpdateTodoById)).Methods("PATCH")
+	todosRouter.Handle("/{id:[0-9]+}/", api.handler(api.DeleteTodoById)).Methods("DELETE")
 }
 
 func (api *API) handler(f func(*app.Context, http.ResponseWriter, *http.Request) error) http.Handler {
@@ -62,6 +74,25 @@ func (api *API) handler(f func(*app.Context, http.ResponseWriter, *http.Request)
 		ctx := api.App.NewContext().WithRemoteAddress(api.IPAddressForRequest(r))
 		ctx = ctx.WithLogger(ctx.Logger.WithField("request_id", base64.RawURLEncoding.EncodeToString(model.NewId())))
 
+		if username, password, ok := r.BasicAuth(); ok {
+			user, err := api.App.GetUserByEmail(username)
+
+			if user == nil || err != nil {
+				if err != nil {
+					ctx.Logger.WithError(err).Error("unable to get user")
+				}
+				http.Error(w, "invalid credentials", http.StatusForbidden)
+				return
+			}
+
+			if ok := user.CheckPassword(password); !ok {
+				http.Error(w, "invalid credentials", http.StatusForbidden)
+				return
+			}
+
+			ctx = ctx.WithUser(user)
+		}
+
 		defer func() {
 			statusCode := w.(*statusCodeRecorder).StatusCode
 			if statusCode == 0 {
@@ -69,10 +100,10 @@ func (api *API) handler(f func(*app.Context, http.ResponseWriter, *http.Request)
 			}
 			duration := time.Since(beginTime)
 
-			logger := ctx.Logger.WithFields(logrus.Fields {
-				"duration": duration,
+			logger := ctx.Logger.WithFields(logrus.Fields{
+				"duration":   duration,
 				"statusCode": statusCode,
-				"remote": ctx.RemoteAddress,
+				"remote":     ctx.RemoteAddress,
 			})
 
 			logger.Info(r.Method + " " + r.URL.RequestURI())
@@ -89,9 +120,32 @@ func (api *API) handler(f func(*app.Context, http.ResponseWriter, *http.Request)
 		w.Header().Set("Content-Type", "application/json")
 
 		if err := f(ctx, w, r); err != nil {
-			ctx.Logger.Error(err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
+			if verr, ok := err.(*app.ValidationError); ok {
+				data, err := json.Marshal(verr)
+				if err == nil {
+					w.WriteHeader(http.StatusBadRequest)
+					_, err = w.Write(data)
+				}
+
+				if err != nil {
+					ctx.Logger.Error(err)
+					http.Error(w, "internal server error", http.StatusInternalServerError)
+				}
+			} else if uerr, ok := err.(*app.UserError); ok {
+				data, err := json.Marshal(uerr)
+				if err == nil {
+					w.WriteHeader(uerr.StatusCode)
+					_, err = w.Write(data)
+				}
+
+				if err != nil {
+					ctx.Logger.Error(err)
+					http.Error(w, "internal server error", http.StatusInternalServerError)
+				}
+			} else {
+				ctx.Logger.Error(err)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
 		}
 	})
 

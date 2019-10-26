@@ -60,10 +60,10 @@ var serveCmd = &cobra.Command{
 	Short: "serves the api",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		a, err := app.New()
-
 		if err != nil {
 			return err
 		}
+		defer a.Close()
 
 		api, err := api.New(a)
 		if err != nil {
@@ -75,13 +75,13 @@ var serveCmd = &cobra.Command{
 		go func() {
 			ch := make(chan os.Signal, 1)
 			signal.Notify(ch, os.Interrupt)
+			// this will wait until cancel signal is sent to the app
 			<-ch
 			logrus.Info("Signal received. shutting down...")
 			cancel()
 		}()
 
 		var wg sync.WaitGroup
-		// TODO: should experiment more about this
 		wg.Add(1)
 
 		go func() {
